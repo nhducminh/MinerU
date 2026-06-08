@@ -805,6 +805,7 @@ async def parse_request_form(
 - ka: Kannada.
 - th: Thai, English.
 - el: Greek, English.
+- vi: Vietnamese (alias for latin, uses the Latin OCR model).
 - latin: French, German, Afrikaans, Italian, Spanish, Bosnian, Portuguese, Czech, Welsh, Danish, Estonian, Irish, Croatian, Uzbek, Hungarian, Serbian (Latin), Indonesian, Occitan, Icelandic, Lithuanian, Maori, Malay, Dutch, Norwegian, Polish, Slovak, Slovenian, Albanian, Swedish, Swahili, Tagalog, Turkish, Latin, Azerbaijani, Kurdish, Latvian, Maltese, Pali, Romanian, Vietnamese, Finnish, Basque, Galician, Luxembourgish, Romansh, Catalan, Quechua.
 - arabic: Arabic, Persian, Uyghur, Urdu, Pashto, Kurdish, Sindhi, Balochi, English.
 - east_slavic: Russian, Belarusian, Ukrainian, English.
@@ -812,7 +813,7 @@ async def parse_request_form(
 - devanagari: Hindi, Marathi, Nepali, Bihari, Maithili, Angika, Bhojpuri, Magahi, Santali, Newari, Konkani, Sanskrit, Haryanvi, English.
 """,
         ),
-    ] = ["ch"],
+    ] = ["vi"],
     backend: Annotated[
         str,
         Form(

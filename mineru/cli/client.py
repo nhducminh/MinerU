@@ -1033,16 +1033,17 @@ async def run_orchestrated_cli(
             "th",
             "el",
             "latin",
+            "vi",
             "arabic",
             "east_slavic",
             "cyrillic",
             "devanagari",
         ]
     ),
-    default="ch",
+    default="vi",
     help="""
     Input the languages in the pdf (if known) to improve OCR accuracy.
-    Without languages specified, 'ch' will be used by default.
+    Without languages specified, 'vi' (Vietnamese) will be used by default.
     Adapted only for the case where the backend is set to 'pipeline' and 'hybrid-*'.
     """,
 )
