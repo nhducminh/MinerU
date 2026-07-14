@@ -2,6 +2,7 @@
 import copy
 import json
 import os
+import time
 import warnings
 from pathlib import Path
 
@@ -352,19 +353,24 @@ class PytorchPaddleOCR(TextSystem):
                         img = preprocess_image(img)
                         img = [img]
                     rec_res, elapse = self.text_recognizer(img, tqdm_enable=tqdm_enable, tqdm_desc=tqdm_desc)
+                    logger.info(f"[TIMING] PaddleOCR text_recognizer: {len(img)} crops, {elapse:.3f}s")
                     # [VietOCR Patch Inference]
                     try:
                         if hasattr(self, 'vietocr_detector') and self.vietocr_detector is not None and len(img) > 0:
                             from PIL import Image
                             import cv2
-                            new_rec_res = []
-                            for idx, crop in enumerate(img):
-                                # Chuyển BGR sang RGB cho VietOCR
-                                crop_img = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
-                                text = self.vietocr_detector.predict(crop_img)
-                                score = rec_res[idx][1] if idx < len(rec_res) else 1.0
-                                new_rec_res.append((text, score))
-                            rec_res = new_rec_res
+                            _vietocr_start = time.perf_counter()
+                            crop_imgs = [Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)) for crop in img]
+                            texts = self.vietocr_detector.predict_batch(crop_imgs)
+                            rec_res = [
+                                (text, rec_res[idx][1] if idx < len(rec_res) else 1.0)
+                                for idx, text in enumerate(texts)
+                            ]
+                            _vietocr_elapsed = time.perf_counter() - _vietocr_start
+                            logger.info(
+                                f"[TIMING] VietOCR batch (ocr()): {len(img)} crops, {_vietocr_elapsed:.3f}s total, "
+                                f"{_vietocr_elapsed / len(img) * 1000:.1f}ms/crop"
+                            )
                     except Exception as e:
                         logger.error(f"VietOCR failed during prediction: {e}")
                     # [/VietOCR Patch Inference]
@@ -410,19 +416,24 @@ class PytorchPaddleOCR(TextSystem):
                 img_crop_list.append(img_crop)
 
         rec_res, elapse = self.text_recognizer(img_crop_list)
+        logger.info(f"[TIMING] PaddleOCR text_recognizer (__call__): {len(img_crop_list)} crops, {elapse:.3f}s")
         # [VietOCR Patch Inference]
         try:
             if hasattr(self, 'vietocr_detector') and self.vietocr_detector is not None and len(img_crop_list) > 0:
                 from PIL import Image
                 import cv2
-                new_rec_res = []
-                for idx, crop in enumerate(img_crop_list):
-                    # Chuyển BGR sang RGB cho VietOCR
-                    img = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
-                    text = self.vietocr_detector.predict(img)
-                    score = rec_res[idx][1] if idx < len(rec_res) else 1.0
-                    new_rec_res.append((text, score))
-                rec_res = new_rec_res
+                _vietocr_start = time.perf_counter()
+                crop_imgs = [Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)) for crop in img_crop_list]
+                texts = self.vietocr_detector.predict_batch(crop_imgs)
+                rec_res = [
+                    (text, rec_res[idx][1] if idx < len(rec_res) else 1.0)
+                    for idx, text in enumerate(texts)
+                ]
+                _vietocr_elapsed = time.perf_counter() - _vietocr_start
+                logger.info(
+                    f"[TIMING] VietOCR batch (__call__): {len(img_crop_list)} crops, {_vietocr_elapsed:.3f}s total, "
+                    f"{_vietocr_elapsed / len(img_crop_list) * 1000:.1f}ms/crop"
+                )
         except Exception as e:
             logger.error(f"VietOCR failed during prediction: {e}")
         # [/VietOCR Patch Inference]

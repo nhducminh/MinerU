@@ -57,3 +57,11 @@ _build/
 
 
 output/
+
+# local vietocr-integration test artifacts
+source_pdfs/
+test_batch_input*/
+test_batch_output*/
+test_output_*/
+test_wrapper_output/
+.venv/

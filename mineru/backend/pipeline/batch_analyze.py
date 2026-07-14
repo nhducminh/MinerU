@@ -1,6 +1,7 @@
 # Copyright (c) Opendatalab. All rights reserved.
 import base64
 import html
+import time
 
 import cv2
 from loguru import logger
@@ -305,6 +306,7 @@ class BatchAnalyze:
         if len(images_with_extra_info) == 0:
             return []
 
+        _stage_t0 = time.perf_counter()
         images_layout_res = []
 
         self.model = self.model_manager.get_model(
@@ -325,6 +327,8 @@ class BatchAnalyze:
         )
         # 清理显存
         clean_vram(self.model.device, vram_threshold=8)
+        logger.info(f"[TIMING] Layout stage: {time.perf_counter() - _stage_t0:.3f}s")
+        _stage_t0 = time.perf_counter()
 
         if self.formula_enable:
             images_mfd_res = []
@@ -358,7 +362,8 @@ class BatchAnalyze:
                 # 移除所有的"inline_formula"
                 layout_res[:] = [res for res in layout_res if res.get("label") != "inline_formula"]
 
-
+        logger.info(f"[TIMING] Formula stage: {time.perf_counter() - _stage_t0:.3f}s")
+        _stage_t0 = time.perf_counter()
 
         ocr_res_list_all_page = []
         table_res_list_all_page = []
@@ -411,6 +416,9 @@ class BatchAnalyze:
                                                 'table_page_bbox':table_page_bbox,
                                                 'table_inline_objects':table_inline_objects.get(id(table_res), []),
                                               })
+
+        logger.info(f"[TIMING] Layout-res bookkeeping: {time.perf_counter() - _stage_t0:.3f}s")
+        _stage_t0 = time.perf_counter()
 
         # 表格识别 table recognition
         if self.table_enable:
@@ -583,6 +591,9 @@ class BatchAnalyze:
                     table_res_dict["table_res"]["html"] = html_code[start_index:end_index]
 
 
+        logger.info(f"[TIMING] Table stage: {time.perf_counter() - _stage_t0:.3f}s")
+        _stage_t0 = time.perf_counter()
+
         # OCR det
         if self.text_ocr_det_batch_enabled:
             # 批处理模式 - 按语言和分辨率分组
@@ -742,6 +753,9 @@ class BatchAnalyze:
 
                         ocr_res_list_dict['layout_res'].extend(ocr_result_list)
 
+        logger.info(f"[TIMING] OCR-det stage: {time.perf_counter() - _stage_t0:.3f}s")
+        _stage_t0 = time.perf_counter()
+
         # OCR rec
         # Create dictionaries to store items by language
         need_ocr_lists_by_lang = {}  # Dict of lists for each language
@@ -874,5 +888,7 @@ class BatchAnalyze:
                 ocr_res_list_dict["layout_res"],
                 ocr_res_list_dict["ocr_enable"],
             )
+
+        logger.info(f"[TIMING] OCR-rec + seal stage: {time.perf_counter() - _stage_t0:.3f}s")
 
         return images_layout_res
