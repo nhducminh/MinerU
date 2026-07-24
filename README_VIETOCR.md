@@ -9,8 +9,8 @@ Toàn bộ tích hợp nằm **độc lập ngay trong repo này** (`mineru/mode
 
 ### 1. Rớt dấu do Mô hình Nhận diện (PaddleOCR)
 MinerU gốc dùng chung 1 model nhận diện ("latin") cho tất cả các ngôn ngữ Latin (Pháp, Đức, Tây Ban Nha... và cả tiếng Việt) — dù ở phiên bản PP-OCRv4 hay v5. Model gộp chung này không phủ hết bộ dấu thanh phức tạp của tiếng Việt, dẫn tới lỗi rớt dấu/nhận sai ký tự thường xuyên.
-* **Giải pháp:** Can thiệp trực tiếp vào `mineru/model/ocr/pytorch_paddle.py` (class `PytorchPaddleOCR`, cả 2 nhánh `ocr()` và `__call__()`), chèn **VietOCR** (`vgg_transformer`) vào bước nhận diện (`rec`), thay cho model "latin" gộp chung. PaddleOCR vẫn đảm nhiệm bước phát hiện vùng chữ (`det`) như bình thường.
-* Về hiệu năng nhận diện: dùng `predict_batch()` của VietOCR (không phải vòng lặp `predict()` từng ô một). Đã benchmark thực tế và xác nhận `predict_batch` **nhanh hơn ~1.8 lần** so với vòng lặp ở quy mô thực tế (hàng trăm crop/lần chạy), đồng thời **không gây méo khung/giảm độ chính xác** — đã verify bằng cách so khớp từng ký tự đầu ra giữa 2 cách.
+* **Giải pháp:** Can thiệp trực tiếp vào `mineru/model/ocr/pytorch_paddle.py` (class `PytorchPaddleOCR`, cả 2 nhánh `ocr()` và `__call__()`), chèn **VietOCR** (`vgg_transformer`) vào bước nhận diện (`rec`), thay cho model "latin" gộp chung. PaddleOCR vẫn đảm nhiệm bước phát hiện vùng chữ (`det`) như bình thường; bước **nhận diện (`rec`) gốc của PaddleOCR bị bỏ qua hoàn toàn** khi VietOCR khả dụng (chỉ fallback về PaddleOCR nếu VietOCR lỗi) — trước đây cả 2 vẫn chạy song song dù text của PaddleOCR bị vứt bỏ, chỉ giữ lại score để lọc box; giờ score được tự tính từ chính VietOCR (trung bình xác suất softmax), nên không cần chạy PaddleOCR recognizer nữa.
+* Về hiệu năng nhận diện: dùng `mineru/model/ocr/vietocr_fast_batch.py` — **tái triển khai thủ công** vòng lặp decode của VietOCR với **KV-cache** (self-attention cache + cross-attention precompute) và **early-exit** (dừng sớm từng sequence khi ra EOS thay vì chờ cả batch), thay cho `predict_batch()`/`translate()` gốc của thư viện `vietocr` (vốn tính lại toàn bộ prefix mỗi bước, tốn kém theo O(prefix_len), và có thể OOM khi batch quá lớn do `torch.cat()` không giới hạn kích thước). Đã benchmark: **nhanh hơn ~26 lần** so với `predict_batch()` gốc (đo cô lập), **~3 lần** ngay trong pipeline thật (đo trên batch OCR lớn). Đã verify đúng đắn tuyệt đối (0 sai lệch so với `predict()` gốc từng ảnh, nhiều lần test trên hàng nghìn crop). Chi tiết đầy đủ số liệu + phương pháp đo: [`VIETOCR_BENCHMARK_RESULTS.md`](VIETOCR_BENCHMARK_RESULTS.md).
 
 ### 2. File PDF có Text Layer bị Lỗi Font
 Với các file PDF được xuất từ MS Word có định dạng phông chữ lạ, lớp văn bản ẩn (text layer) thường bị vỡ dấu (Ví dụ: "QUYẾT ĐỊNH" thành "QUYT ĐNH"). MinerU mặc định sẽ bốc lớp text này ra thay vì dùng OCR, khiến kết quả sai hoàn toàn.
@@ -50,10 +50,13 @@ python mineru_viet.py -p "đường_dẫn_đến_thư_mục_hoặc_file_PDF" -o 
 | Cấu hình | Tốc độ |
 |---|---|
 | CPU (torch mặc định, chưa tối ưu) | ~10s/trang |
-| GPU (cu128) + `predict_batch` | ~4.5s/trang (quy mô lớn, 1 file dài hoặc nhiều file gộp 1 lần chạy) |
-| GPU + `predict_batch` + gộp nhiều file nhỏ vào 1 process | thêm ~1.3-2x tùy số trang/file (file càng ngắn, gộp càng lợi) |
+| GPU (cu128) + `predict_batch` gốc | ~4.5s/trang |
+| GPU + KV-cache + early-exit (hiện tại) | **~26 lần nhanh hơn `predict_batch` gốc** (đo cô lập, 2000 crop); **~3 lần** trong pipeline thật trên batch OCR lớn |
 
-Lưu ý: vùng con dấu/logo/chữ trang trí phức tạp vẫn là điểm yếu chung của mọi engine OCR (không riêng VietOCR).
+Lưu ý: vùng con dấu/logo/chữ trang trí phức tạp vẫn là điểm yếu chung của mọi engine OCR (không riêng VietOCR). Số liệu chi tiết, phương pháp đo, và log debug từng bước decode: xem [`VIETOCR_BENCHMARK_RESULTS.md`](VIETOCR_BENCHMARK_RESULTS.md) và [`VIETOCR_PERF_CHECKLIST.md`](VIETOCR_PERF_CHECKLIST.md).
+
+## 🎓 Dataset & Fine-tune
+Model VietOCR đi kèm (`vietocr_weights/vietocr_finetuned.pth`, không commit vào git — vượt giới hạn 100MB của GitHub, đặt file này thủ công vào `vietocr_weights/` trước khi chạy) được fine-tune trên ~13.6k dòng dữ liệu nông nghiệp tiếng Việt thật, nhãn sinh bởi Qwen3-VL và đã qua 1 vòng audit/sửa lỗi nhãn tự động (dùng bằng chứng tần suất từ trong corpus, không chỉ tin dự đoán của 1 model). Pipeline chuẩn bị dataset + script fine-tune nằm ở `../OCR/` (repo cha) — xem `OCR/README.md`, `OCR/FINETUNE_VIETOCR.md`, `OCR/FINETUNE_PLAN_DATA_FIX.md`.
 
 ---
 **Bản quyền:** Dựa trên lõi mã nguồn mở MinerU (Opendatalab). VietOCR được phát triển bởi pbcquoc.
