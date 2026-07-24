@@ -226,7 +226,15 @@ class PytorchPaddleOCR(TextSystem):
         try:
             from vietocr.tool.predictor import Predictor
             from vietocr.tool.config import Cfg
-            self.vietocr_cfg = Cfg.load_config_from_name('vgg_transformer')
+            mineru_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+            finetuned_weights = os.path.join(mineru_root, "vietocr_weights", "vietocr_finetuned.pth")
+            finetuned_config = os.path.join(mineru_root, "vietocr_weights", "vgg_transformer.yml")
+            if os.path.isfile(finetuned_weights) and os.path.isfile(finetuned_config):
+                self.vietocr_cfg = Cfg.load_config_from_file(finetuned_config)
+                self.vietocr_cfg['weights'] = finetuned_weights
+                logger.info(f"Using fine-tuned VietOCR weights: {finetuned_weights}")
+            else:
+                self.vietocr_cfg = Cfg.load_config_from_name('vgg_transformer')
             self.vietocr_cfg['device'] = device if 'cuda' in device or 'mps' in device else 'cpu'
             self.vietocr_detector = Predictor(self.vietocr_cfg)
             logger.info("Successfully loaded VietOCR (vgg_transformer) for Vietnamese parsing.")
@@ -234,6 +242,19 @@ class PytorchPaddleOCR(TextSystem):
             logger.error(f"Failed to load VietOCR: {e}")
             self.vietocr_detector = None
         # [/VietOCR Patch Init]
+
+    def _vietocr_predict_batch_chunked(self, crop_imgs, chunk_size=128):
+        # vietocr's predict_batch() concatenates every image sharing a resized
+        # width into one torch.cat() call with no size cap, which can try to
+        # allocate a single multi-GB contiguous buffer and OOM on a full-page
+        # crop list; its translate() also runs the whole batch's decode loop
+        # until every sequence hits eos, so short lines wait on the longest
+        # one. vietocr_fast_batch.predict_batch_grouped() sub-batches by
+        # estimated text length and early-exits finished sequences per step
+        # (see MinerU/README_VIETOCR.md).
+        from mineru.model.ocr.vietocr_fast_batch import predict_batch_grouped
+
+        return predict_batch_grouped(self.vietocr_detector, crop_imgs, sub_batch_size=chunk_size)
 
     def _resolve_seal_debug_dir(self):
         if not self.is_seal:
@@ -352,29 +373,35 @@ class PytorchPaddleOCR(TextSystem):
                     if not isinstance(img, list):
                         img = preprocess_image(img)
                         img = [img]
-                    rec_res, elapse = self.text_recognizer(img, tqdm_enable=tqdm_enable, tqdm_desc=tqdm_desc)
-                    logger.info(f"[TIMING] PaddleOCR text_recognizer: {len(img)} crops, {elapse:.3f}s")
+
                     # [VietOCR Patch Inference]
-                    try:
-                        if hasattr(self, 'vietocr_detector') and self.vietocr_detector is not None and len(img) > 0:
+                    # Skip PaddleOCR's own recognizer entirely when VietOCR is
+                    # available -- its text would be overwritten anyway, and
+                    # VietOCR now returns its own confidence (see
+                    # vietocr_fast_batch._translate_early_exit), so there is
+                    # no more use for PaddleOCR's recognizer pass in this path.
+                    rec_res = None
+                    if hasattr(self, 'vietocr_detector') and self.vietocr_detector is not None and len(img) > 0:
+                        try:
                             from PIL import Image
                             import cv2
                             _vietocr_start = time.perf_counter()
                             crop_imgs = [Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)) for crop in img]
-                            texts = self.vietocr_detector.predict_batch(crop_imgs)
-                            rec_res = [
-                                (text, rec_res[idx][1] if idx < len(rec_res) else 1.0)
-                                for idx, text in enumerate(texts)
-                            ]
+                            rec_res = self._vietocr_predict_batch_chunked(crop_imgs)
                             _vietocr_elapsed = time.perf_counter() - _vietocr_start
                             logger.info(
                                 f"[TIMING] VietOCR batch (ocr()): {len(img)} crops, {_vietocr_elapsed:.3f}s total, "
                                 f"{_vietocr_elapsed / len(img) * 1000:.1f}ms/crop"
                             )
-                    except Exception as e:
-                        logger.error(f"VietOCR failed during prediction: {e}")
+                        except Exception as e:
+                            logger.error(f"VietOCR failed during prediction: {e}")
+                            rec_res = None
                     # [/VietOCR Patch Inference]
-                    # logger.debug("rec_res num  : {}, elapsed : {}".format(len(rec_res), elapse))
+
+                    if rec_res is None:
+                        rec_res, elapse = self.text_recognizer(img, tqdm_enable=tqdm_enable, tqdm_desc=tqdm_desc)
+                        logger.info(f"[TIMING] PaddleOCR text_recognizer: {len(img)} crops, {elapse:.3f}s")
+
                     ocr_res.append(rec_res)
                 return ocr_res
 
@@ -415,28 +442,30 @@ class PytorchPaddleOCR(TextSystem):
                 img_crop = get_rotate_crop_image_for_text_rec(ori_im, tmp_box)
                 img_crop_list.append(img_crop)
 
-        rec_res, elapse = self.text_recognizer(img_crop_list)
-        logger.info(f"[TIMING] PaddleOCR text_recognizer (__call__): {len(img_crop_list)} crops, {elapse:.3f}s")
         # [VietOCR Patch Inference]
-        try:
-            if hasattr(self, 'vietocr_detector') and self.vietocr_detector is not None and len(img_crop_list) > 0:
+        # Skip PaddleOCR's own recognizer entirely when VietOCR is available
+        # (see the identical rationale in the ocr() branch above).
+        rec_res = None
+        if hasattr(self, 'vietocr_detector') and self.vietocr_detector is not None and len(img_crop_list) > 0:
+            try:
                 from PIL import Image
                 import cv2
                 _vietocr_start = time.perf_counter()
                 crop_imgs = [Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)) for crop in img_crop_list]
-                texts = self.vietocr_detector.predict_batch(crop_imgs)
-                rec_res = [
-                    (text, rec_res[idx][1] if idx < len(rec_res) else 1.0)
-                    for idx, text in enumerate(texts)
-                ]
+                rec_res = self._vietocr_predict_batch_chunked(crop_imgs)
                 _vietocr_elapsed = time.perf_counter() - _vietocr_start
                 logger.info(
                     f"[TIMING] VietOCR batch (__call__): {len(img_crop_list)} crops, {_vietocr_elapsed:.3f}s total, "
                     f"{_vietocr_elapsed / len(img_crop_list) * 1000:.1f}ms/crop"
                 )
-        except Exception as e:
-            logger.error(f"VietOCR failed during prediction: {e}")
+            except Exception as e:
+                logger.error(f"VietOCR failed during prediction: {e}")
+                rec_res = None
         # [/VietOCR Patch Inference]
+
+        if rec_res is None:
+            rec_res, elapse = self.text_recognizer(img_crop_list)
+            logger.info(f"[TIMING] PaddleOCR text_recognizer (__call__): {len(img_crop_list)} crops, {elapse:.3f}s")
         # logger.debug("rec_res num  : {}, elapsed : {}".format(len(rec_res), elapse))
         if self.is_seal:
             self._dump_seal_debug_artifacts(ori_im, dt_boxes, img_crop_list, rec_res)

@@ -1,0 +1,13 @@
+.venv
+.git
+.github
+test_output_*
+test_batch_input*
+test_batch_output*
+test_wrapper_output
+source_pdfs
+docs
+demo
+mineru.egg-info
+__pycache__
+*.pyc

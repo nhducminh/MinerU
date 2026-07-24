@@ -14,8 +14,13 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Install mineru latest
-RUN python3 -m pip install -U 'mineru[core]>=3.0.0' --break-system-packages && \
+# Build from local source (vietocr-integration fork) instead of the vanilla PyPI
+# package, so the OCR recognition step uses the fine-tuned VietOCR model
+# (mineru/model/ocr/pytorch_paddle.py) instead of PaddleOCR's generic "latin" model.
+WORKDIR /app/MinerU
+COPY . .
+
+RUN python3 -m pip install -e '.[core]' --break-system-packages && \
     python3 -m pip cache purge
 
 # Download models and update the configuration file

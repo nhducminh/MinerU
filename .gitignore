@@ -65,3 +65,12 @@ test_batch_output*/
 test_output_*/
 test_wrapper_output/
 .venv/
+
+# fine-tuned VietOCR weights (150MB+, exceeds GitHub's 100MB push limit;
+# keep only the small config tracked, place the .pth locally per
+# README_VIETOCR.md instead of committing it)
+vietocr_weights/*.pth
+mineru_*_output*/
+mineru_bench_output*/
+mineru_verify_datafix_output/
+tree_output/
