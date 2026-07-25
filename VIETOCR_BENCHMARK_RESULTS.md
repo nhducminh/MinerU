@@ -246,9 +246,18 @@ sự phần decode của VietOCR**:
   của MinerU (layout/table/formula/seal), package `vietocr` gốc (vẫn cài
   nguyên, chỉ không còn được gọi từ đường MinerU).
 
-**Rủi ro bảo trì**: `_translate_kv_cache()` hard-code giả định `norm_first=False`
-(post-norm) và cấu trúc 6-layer/`nhead=8`/`d_model=256` đọc từ model hiện tại
-(`vietocr_weights/vgg_transformer.yml`). Nếu sau này **fine-tune lại VietOCR
-với kiến trúc khác** (đổi `num_decoder_layers`, `nhead`, `d_model`, hoặc dùng
-`norm_first=True`), code này **sẽ không tự động khớp** — cần kiểm tra/sửa lại
-theo kiến trúc mới trước khi dùng.
+**An toàn kiến trúc (đã guard)**: `_translate_kv_cache()` reimplement tay
+`nn.TransformerDecoderLayer.forward` nên chỉ đúng cho stack post-norm
+(`norm_first=False`) của `nn.TransformerDecoderLayer`. Số layer / `nhead` /
+`d_model` được **đọc động** từ model (không hard-code), nhưng `norm_first` và
+kiểu layer thì không suy ra được từ trọng số. Vì vậy `predict_batch_grouped()`
+gọi `_kv_cache_applicable(model)` để kiểm tra trước: nếu model dùng
+`norm_first=True`, một lớp decoder được subclass, thiếu `decoder.norm`, hoặc
+seq-model không phải transformer → **tự động fallback** sang
+`_translate_early_exit()` (đường chậm hơn nhưng đúng với mọi `norm_first` vì nó
+gọi thẳng `forward_decoder` của chính model); nếu ngay cả API
+LanguageTransformer cũng không có → raise, để caller `pytorch_paddle.py` fallback
+tiếp về PaddleOCR recognizer. Nghĩa là fine-tune lại với kiến trúc khác sẽ **tự
+chọn đường đúng**, không sinh output sai âm thầm. Đã test cả 4 case của guard
+(post-norm→fast, pre-norm/subclass/no-norm→fallback) và xác nhận 2 đường decode
+đều khớp 100% với `predict()` gốc.

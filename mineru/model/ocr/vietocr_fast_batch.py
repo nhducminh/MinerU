@@ -1,6 +1,7 @@
 import csv
 import math
 import os
+import tempfile
 import time
 from collections import defaultdict
 
@@ -11,7 +12,8 @@ from vietocr.tool.translate import process_input, resize
 
 _STEP_DEBUG = os.environ.get("MINERU_VIETOCR_STEP_DEBUG") == "1"
 _STEP_DEBUG_CSV = os.environ.get(
-    "MINERU_VIETOCR_STEP_DEBUG_CSV", r"D:\SGLang\MinerU\vietocr_step_debug.csv"
+    "MINERU_VIETOCR_STEP_DEBUG_CSV",
+    os.path.join(tempfile.gettempdir(), "vietocr_step_debug.csv"),
 )
 
 
@@ -135,9 +137,46 @@ def _attn_step(q_1, k_full, v_full, num_heads, out_proj, d_model):
     return out_proj(out)
 
 
+def _kv_cache_applicable(model):
+    # The KV-cache decode below re-implements
+    # torch.nn.TransformerDecoderLayer.forward by hand, so it is only correct
+    # for a *post-norm* (norm_first=False) stack of plain
+    # nn.TransformerDecoderLayer inside vietocr's LanguageTransformer (the
+    # default `transformer` seq modeling). Anything else -- norm_first=True, a
+    # subclassed decoder layer with different forward math, a non-transformer
+    # seq model, or a missing decoder -- must use the architecture-agnostic
+    # fallback (_translate_early_exit), which drives the model's own
+    # forward_decoder and is therefore correct for any of these.
+    lt = getattr(model, "transformer", None)
+    inner = getattr(lt, "transformer", None)
+    decoder = getattr(inner, "decoder", None)
+    layers = getattr(decoder, "layers", None)
+    if not layers or getattr(decoder, "norm", None) is None:
+        return False
+    for layer in layers:
+        # Exact type (not isinstance): a subclass may override forward math.
+        if type(layer) is not torch.nn.TransformerDecoderLayer:
+            return False
+        if getattr(layer, "norm_first", False):
+            return False
+    return True
+
+
+def _transformer_api_available(model):
+    # _translate_early_exit needs vietocr's LanguageTransformer encode/decode
+    # entry points; absent them (an exotic seq model) neither in-house decoder
+    # applies and the caller should degrade to its own recognizer.
+    lt = getattr(model, "transformer", None)
+    return (
+        hasattr(model, "cnn")
+        and hasattr(lt, "forward_encoder")
+        and hasattr(lt, "forward_decoder")
+    )
+
+
 def _decoder_layer_step(layer, x_1, self_k_cache, self_v_cache, mem_k, mem_v, num_heads, d_model):
-    # Re-implements TransformerDecoderLayer.forward (norm_first=False, the
-    # default this model was trained with -- see torch/nn/modules/transformer.py)
+    # Re-implements TransformerDecoderLayer.forward (norm_first=False; the
+    # applicability of this is checked by _kv_cache_applicable before use)
     # for a single new position, using the layer's own weights. Self-attention
     # reuses cached K/V from previous steps instead of recomputing them;
     # cross-attention reuses the precomputed, unchanging encoder-memory K/V.
@@ -311,6 +350,25 @@ def predict_batch_grouped(predictor, imgs, sub_batch_size=256):
     vocab = predictor.vocab
     use_cuda = torch.cuda.is_available() and 'cuda' in str(device)
 
+    # Pick the fastest decoder the model's architecture actually supports:
+    # KV-cache (fastest) only for a post-norm nn.TransformerDecoderLayer stack,
+    # otherwise the architecture-agnostic early-exit path. If neither applies,
+    # raise so the caller can fall back to its own recognizer rather than
+    # silently returning wrong text.
+    if _kv_cache_applicable(model):
+        decode_fn = _translate_kv_cache
+    elif _transformer_api_available(model):
+        logger.warning(
+            "VietOCR KV-cache path not applicable for this model architecture; "
+            "using the slower architecture-agnostic early-exit decoder."
+        )
+        decode_fn = _translate_early_exit
+    else:
+        raise RuntimeError(
+            "VietOCR model exposes neither a supported decoder layer stack nor "
+            "the LanguageTransformer encode/decode API; cannot batch-decode."
+        )
+
     t_wall_start = time.perf_counter()
 
     # CPU-side: PIL resize + numpy/tensor prep, one image at a time.
@@ -343,7 +401,7 @@ def predict_batch_grouped(predictor, imgs, sub_batch_size=256):
             if use_cuda:
                 torch.cuda.synchronize()
             t0 = time.perf_counter()
-            sequences, confidences = _translate_kv_cache(batch_tensor, model, device, stats=stats)
+            sequences, confidences = decode_fn(batch_tensor, model, device, stats=stats)
             if use_cuda:
                 torch.cuda.synchronize()
             t_decode_wall += time.perf_counter() - t0
